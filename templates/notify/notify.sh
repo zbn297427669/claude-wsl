@@ -28,6 +28,16 @@ log() {
     } 2>/dev/null || true
 }
 
+# Runtime toggle (notify-ctl.sh / /wsl-notify). Drain stdin so Claude Code does not hang.
+_NOTIFY_HOME="${CLAUDE_WSL_HOME:-$HOME/.local/share/claude-wsl}"
+if [ -f "$_NOTIFY_HOME/disabled" ] 2>/dev/null || [ -f "$SCRIPT_DIR/disabled" ] 2>/dev/null; then
+    log "=== notify.sh skipped (disabled) ==="
+    if [ ! -t 0 ]; then
+        timeout 1 cat >/dev/null 2>&1 || true
+    fi
+    exit 0
+fi
+
 log "=== notify.sh called ==="
 log "PWD: $PWD"
 log "CLAUDE_WORKING_DIRECTORY: ${CLAUDE_WORKING_DIRECTORY:-not set}"
@@ -120,6 +130,19 @@ elif [ -z "$CLAUDE_SESSION_ID" ]; then
     export CLAUDE_SESSION_ID="$(date +%s)-$$"
 fi
 log "Session ID: $CLAUDE_SESSION_ID"
+
+# Record the foreground window NOW (user is still on this terminal).
+# Must be synchronous: a detached helper often captures the wrong window.
+if [ "$HOOK_EVENT" = "SessionStart" ] || [ "$HOOK_EVENT" = "UserPromptSubmit" ]; then
+    if command -v powershell.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+        CAPTURE_SCRIPT=$(wslpath -w "$SCRIPT_DIR/capture-hwnd.ps1" 2>/dev/null) || CAPTURE_SCRIPT=""
+        if [ -n "$CAPTURE_SCRIPT" ] && [ -n "$CLAUDE_SESSION_ID" ]; then
+            timeout 2 powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden \
+                -File "$CAPTURE_SCRIPT" -SessionId "$CLAUDE_SESSION_ID" >/dev/null 2>&1 || true
+            log "Captured HWND for session $CLAUDE_SESSION_ID"
+        fi
+    fi
+fi
 
 # Activate bell icon - create signal file for shell to detect (with error handling)
 # Use different files for permission requests vs completions so shell knows which state to return to
@@ -340,16 +363,16 @@ if [ "$HOOK_EVENT" = "Stop" ] || [ "$HOOK_EVENT" = "Notification" ]; then
             if command -v wslpath >/dev/null 2>&1 && command -v powershell.exe >/dev/null 2>&1; then
                 WINDOWS_SCRIPT=$(wslpath -w "$NOTIFICATION_SCRIPT" 2>/dev/null) || WINDOWS_SCRIPT=""
                 if [ -n "$WINDOWS_SCRIPT" ]; then
-                    powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden \
+                    powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden \
                         -File "$WINDOWS_SCRIPT" \
                         -Title "$FOLDER_NAME" \
                         -Message "$NOTIFICATION_MESSAGE" \
-                        -SessionId "$HOOK_SESSION_ID" \
+                        -SessionId "${HOOK_SESSION_ID:-$CLAUDE_SESSION_ID}" \
                         -TabTitle "$FOLDER_NAME" \
                         -WtSession "${TARGET_WT_SESSION:-}" \
                         2>/dev/null &
                     log "Notification script called (PID: $!)"
-                    log "Passed WT_SESSION to notification: ${TARGET_WT_SESSION:-none}"
+                    log "Passed session to toast: ${HOOK_SESSION_ID:-$CLAUDE_SESSION_ID}"
                 else
                     log "ERROR: Could not convert path to Windows format"
                 fi
