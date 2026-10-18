@@ -12,6 +12,7 @@ spent way too long clicking between tabs to check if Claude was done processing.
 - **orange spinner** when Claude is processing
 - **bell emoji in tab title** when Claude finishes
 - **Windows toast notification** when response is ready
+- **status-line lamp** (🔔 on / 🔕 off) — display only; toggle with `/wsl-notify`
 - **directory inheritance** for new tabs (they open where you actually are)
 
 basically: you can work in another tab and get notified when Claude is done. no more compulsive tab checking.
@@ -24,6 +25,13 @@ claude-wsl install
 ```
 
 that's it. installer hooks into Claude Code's lifecycle events and adds shell integration to your `.bashrc`. shell integration loads automatically on next terminal start.
+
+if you already have a `statusLine` command (a pet bar, etc.), install wraps it: the existing command is saved to `~/.local/share/claude-wsl/statusline-inner` and Claude Code runs `statusline.sh` instead. lamp only, not a click target. `/wsl-notify` still toggles toasts. to point the inner command yourself:
+
+```bash
+echo '/path/to/your-statusline.sh' > ~/.local/share/claude-wsl/statusline-inner
+```
+
 
 ## requirements
 

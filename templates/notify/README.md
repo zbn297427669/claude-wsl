@@ -19,6 +19,8 @@ claude-wsl-integration install
 - **`notify-wrapper.sh`** - Wrapper script that routes hook events
 - **`claude-notify-wrapper.sh`** - Shell integration for .bashrc
 - **`config.sh`** - Configuration file for notification settings
+- **`statusline.sh`** - Display-only 🔔/🔕 for Claude Code `statusLine`
+- **`notify-ctl.sh`** - `/wsl-notify` on|off|toggle|status
 
 ### PowerShell Scripts
 
