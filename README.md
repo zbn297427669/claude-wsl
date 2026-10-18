@@ -13,6 +13,7 @@ spent way too long clicking between tabs to check if Claude was done processing.
 - **bell emoji in tab title** when Claude finishes
 - **Windows toast notification** when response is ready
 - **status-line lamp** (🔔 on / 🔕 off) — display only; toggle with `/wsl-notify`
+- **toast sound** — `/wsl-notify sound Mail` (also IM, Reminder, SMS, Default, silent)
 - **directory inheritance** for new tabs (they open where you actually are)
 
 basically: you can work in another tab and get notified when Claude is done. no more compulsive tab checking.

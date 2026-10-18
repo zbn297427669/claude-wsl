@@ -1,6 +1,6 @@
 ---
-description: 打开或关闭 WSL 的 Claude 完成通知（Windows toast + 标签指示）
-argument-hint: on|off|toggle|status
+description: 打开或关闭 WSL 的 Claude 完成通知，或选择铃声（Mail / Reminder 等）
+argument-hint: on|off|toggle|status|sound
 allowed-tools: ["Bash"]
 ---
 

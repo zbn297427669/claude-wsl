@@ -6,7 +6,8 @@ param(
     [string]$SessionId = "",
     [string]$Hwnd = "",
     [string]$TabTitle = "",
-    [string]$WtSession = ""
+    [string]$WtSession = "",
+    [string]$Sound = "Default"
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -65,15 +66,46 @@ if ($SessionId) { $qs += "sid=$([uri]::EscapeDataString($SessionId))" }
 if ($qs.Count -gt 0) { $launch = $launch + '?' + ($qs -join '&') }
 $LaunchEscaped = [System.Security.SecurityElement]::Escape($launch)
 
+function Resolve-ToastAudio([string]$Raw) {
+    $n = ($Raw -replace '^ms-winsoundevent:', '').Trim()
+    if ([string]::IsNullOrWhiteSpace($n) -or $n -match '^(?i)(silent|mute|none|off)$') {
+        return @{ Silent = $true; Src = ''; Looping = $false }
+    }
+    $n = $n -replace '^(?i)Notification\.(Looping\.)?', ''
+    if ($n -match '^(?i)(Alarm|Call)\d{0,2}$') {
+        $canon = 'Notification.Looping.' + $n.Substring(0,1).ToUpper() + $n.Substring(1)
+        if ($canon -notmatch '^Notification\.Looping\.(Alarm|Call)([2-9]|10)?$') {
+            $canon = 'Notification.Default'
+        }
+        return @{ Silent = $false; Src = "ms-winsoundevent:$canon"; Looping = $true }
+    }
+    switch -Regex ($n) {
+        '^(?i)IM$' { $canon = 'Notification.IM' }
+        '^(?i)Mail$' { $canon = 'Notification.Mail' }
+        '^(?i)Reminder$' { $canon = 'Notification.Reminder' }
+        '^(?i)SMS$' { $canon = 'Notification.SMS' }
+        default { $canon = 'Notification.Default' }
+    }
+    return @{ Silent = $false; Src = "ms-winsoundevent:$canon"; Looping = $false }
+}
+
+$audio = Resolve-ToastAudio $Sound
+$audioXml = if ($audio.Silent) {
+    '<audio silent="true" />'
+} else {
+    "<audio src=`"$($audio.Src)`" />"
+}
+$duration = if ($audio.Looping) { 'long' } else { 'short' }
+
 $template = @"
-<toast activationType="protocol" launch="$LaunchEscaped">
+<toast duration="$duration" activationType="protocol" launch="$LaunchEscaped">
     <visual>
         <binding template="ToastGeneric">
             <text hint-style="title">$TitleEscaped</text>
             <text hint-maxLines="3">$MessageEscaped</text>
         </binding>
     </visual>
-    <audio src="ms-winsoundevent:Notification.Default" />
+    $audioXml
 </toast>
 "@
 

@@ -399,6 +399,13 @@ if [ "$SKIP_TOAST" != "1" ] && { [ "$HOOK_EVENT" = "Stop" ] || [ "$HOOK_EVENT" =
             if command -v wslpath >/dev/null 2>&1 && command -v powershell.exe >/dev/null 2>&1; then
                 WINDOWS_SCRIPT=$(wslpath -w "$NOTIFICATION_SCRIPT" 2>/dev/null) || WINDOWS_SCRIPT=""
                 if [ -n "$WINDOWS_SCRIPT" ]; then
+                    NOTIFY_SOUND=""
+                    if [ -f "$_NOTIFY_HOME/sound" ]; then
+                        NOTIFY_SOUND=$(head -n 1 "$_NOTIFY_HOME/sound" 2>/dev/null | tr -d '\r')
+                    elif [ -f "$SCRIPT_DIR/sound" ]; then
+                        NOTIFY_SOUND=$(head -n 1 "$SCRIPT_DIR/sound" 2>/dev/null | tr -d '\r')
+                    fi
+                    NOTIFY_SOUND="${NOTIFY_SOUND:-Default}"
                     powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden \
                         -File "$WINDOWS_SCRIPT" \
                         -Title "$FOLDER_NAME" \
@@ -406,6 +413,7 @@ if [ "$SKIP_TOAST" != "1" ] && { [ "$HOOK_EVENT" = "Stop" ] || [ "$HOOK_EVENT" =
                         -SessionId "${HOOK_SESSION_ID:-$CLAUDE_SESSION_ID}" \
                         -TabTitle "$FOLDER_NAME" \
                         -WtSession "${TARGET_WT_SESSION:-}" \
+                        -Sound "$NOTIFY_SOUND" \
                         2>/dev/null &
                     log "Notification script called (PID: $!)"
                     log "Passed session to toast: ${HOOK_SESSION_ID:-$CLAUDE_SESSION_ID}"
