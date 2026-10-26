@@ -1,73 +1,127 @@
 # Claude Code WSL Notification Script
+# ASCII-only: Windows PowerShell 5.1 misreads UTF-8-without-BOM.
 param(
     [string]$Title = "Claude Code Update",
-    [string]$Message = "New activity detected"
+    [string]$Message = "New activity detected",
+    [string]$SessionId = "",
+    [string]$Hwnd = "",
+    [string]$TabTitle = "",
+    [string]$WtSession = "",
+    [string]$Sound = "Default"
 )
 
-# Create notification using Windows.UI.Notifications
+$ErrorActionPreference = 'SilentlyContinue'
+
+function Ensure-Protocol {
+    $root = 'HKCU:\Software\Classes\claude-wsl\shell\open\command'
+    $vbs = Join-Path $env:LOCALAPPDATA 'claude-wsl\focus-launch.vbs'
+    if ((Test-Path $root) -and (Test-Path $vbs)) { return }
+    $installer = Join-Path $PSScriptRoot 'install-protocol.ps1'
+    if (Test-Path $installer) {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer | Out-Null
+    }
+}
+
+function Get-StoredHwnd([string]$Sid) {
+    if ([string]::IsNullOrWhiteSpace($Sid)) { return '' }
+    $Sid = ($Sid -replace '[^A-Za-z0-9._-]', '_')
+    $p = Join-Path $env:LOCALAPPDATA "claude-wsl\sessions\$Sid.txt"
+    if (Test-Path $p) {
+        return ((Get-Content -Raw $p).Trim())
+    }
+    return ''
+}
+
+Ensure-Protocol
+
+if ([string]::IsNullOrWhiteSpace($Hwnd) -and $SessionId) {
+    $Hwnd = Get-StoredHwnd $SessionId
+}
+
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
 $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
 
-# Clean and escape text for proper display
-# Remove escape sequences and control characters (but keep Unicode/emoji)
-# Only remove actual control characters (0x00-0x1F and 0x7F), not all non-ASCII
 $Title = $Title -replace '\\[nrt]', ' ' -replace '\s+', ' ' -replace '[\x00-\x1F\x7F]', '' -replace '^\s+|\s+$', ''
 $Message = $Message -replace '\\[nrt]', ' ' -replace '\s+', ' ' -replace '[\x00-\x1F\x7F]', '' -replace '^\s+|\s+$', ''
 
-# Ensure message isn't empty after cleaning
 if ([string]::IsNullOrWhiteSpace($Message)) {
     $Message = "Response ready"
 }
 
-# Strip markdown formatting (Windows toast doesn't support markdown)
-$Message = $Message -replace '\*\*([^\*]+)\*\*', '$1'  # Remove **bold**
-$Message = $Message -replace '\*([^\*]+)\*', '$1'      # Remove *italic*
-$Message = $Message -replace '__([^_]+)__', '$1'       # Remove __bold__
-$Message = $Message -replace '_([^_]+)_', '$1'         # Remove _italic_
-$Message = $Message -replace '`([^`]+)`', '$1'         # Remove `code`
-$Message = $Message -replace '\[([^\]]+)\]\([^\)]+\)', '$1'  # Remove [links](url)
+$Message = $Message -replace '\*\*([^\*]+)\*\*', '$1'
+$Message = $Message -replace '\*([^\*]+)\*', '$1'
+$Message = $Message -replace '__([^_]+)__', '$1'
+$Message = $Message -replace '_([^_]+)_', '$1'
+$Message = $Message -replace '`([^`]+)`', '$1'
+$Message = $Message -replace '\[([^\]]+)\]\([^\)]+\)', '$1'
 
-# Escape special characters for XML
 $TitleEscaped = [System.Security.SecurityElement]::Escape($Title)
 $MessageEscaped = [System.Security.SecurityElement]::Escape($Message)
 
-# XML template for toast notification
+$launch = 'claude-wsl://focus'
+$qs = @()
+if ($Hwnd -match '^\d+$') { $qs += "hwnd=$Hwnd" }
+if ($SessionId) { $qs += "sid=$([uri]::EscapeDataString($SessionId))" }
+if ($qs.Count -gt 0) { $launch = $launch + '?' + ($qs -join '&') }
+$LaunchEscaped = [System.Security.SecurityElement]::Escape($launch)
+
+function Resolve-ToastAudio([string]$Raw) {
+    $n = ($Raw -replace '^ms-winsoundevent:', '').Trim()
+    if ([string]::IsNullOrWhiteSpace($n) -or $n -match '^(?i)(silent|mute|none|off)$') {
+        return @{ Silent = $true; Src = ''; Looping = $false }
+    }
+    $n = $n -replace '^(?i)Notification\.(Looping\.)?', ''
+    if ($n -match '^(?i)(Alarm|Call)\d{0,2}$') {
+        $canon = 'Notification.Looping.' + $n.Substring(0,1).ToUpper() + $n.Substring(1)
+        if ($canon -notmatch '^Notification\.Looping\.(Alarm|Call)([2-9]|10)?$') {
+            $canon = 'Notification.Default'
+        }
+        return @{ Silent = $false; Src = "ms-winsoundevent:$canon"; Looping = $true }
+    }
+    switch -Regex ($n) {
+        '^(?i)IM$' { $canon = 'Notification.IM' }
+        '^(?i)Mail$' { $canon = 'Notification.Mail' }
+        '^(?i)Reminder$' { $canon = 'Notification.Reminder' }
+        '^(?i)SMS$' { $canon = 'Notification.SMS' }
+        default { $canon = 'Notification.Default' }
+    }
+    return @{ Silent = $false; Src = "ms-winsoundevent:$canon"; Looping = $false }
+}
+
+$audio = Resolve-ToastAudio $Sound
+$audioXml = if ($audio.Silent) {
+    '<audio silent="true" />'
+} else {
+    "<audio src=`"$($audio.Src)`" />"
+}
+$duration = if ($audio.Looping) { 'long' } else { 'short' }
+
 $template = @"
-<toast activationType="protocol">
+<toast duration="$duration" activationType="protocol" launch="$LaunchEscaped">
     <visual>
         <binding template="ToastGeneric">
             <text hint-style="title">$TitleEscaped</text>
             <text hint-maxLines="3">$MessageEscaped</text>
         </binding>
     </visual>
-    <audio src="ms-winsoundevent:Notification.Default" />
+    $audioXml
 </toast>
 "@
 
 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
 $xml.LoadXml($template)
 
-# Create and show toast
 $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
-
-# Use timestamp to ensure each notification is unique and stacks
 $timestamp = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
 $toast.Tag = "ClaudeCode-$timestamp"
-# Don't set Group - this allows notifications to stack instead of replacing each other
-
-# Set expiration time to auto-remove from Action Center after 10 seconds
 $toast.ExpirationTime = [DateTimeOffset]::Now.AddSeconds(10)
-
-# Suppress from Action Center (notification will show as popup but not be pinned)
 $toast.SuppressPopup = $false
 
-# Try multiple app IDs in order of preference
-# Use our custom Claude Code app ID first for branded notifications
 $appIds = @(
-    'Windows.SystemToast.ClaudeCode',  # Custom Claude Code app ID (preferred)
-    'Microsoft.WindowsTerminal_8wekyb3d8bbwe!App',  # Windows Terminal
-    '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'   # PowerShell (fallback)
+    'Windows.SystemToast.ClaudeCode',
+    'Microsoft.WindowsTerminal_8wekyb3d8bbwe!App',
+    '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
 )
 
 $success = $false
@@ -75,21 +129,16 @@ $usedAppId = $null
 foreach ($appId in $appIds) {
     try {
         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
-        # Success
         $success = $true
         $usedAppId = $appId
         break
     } catch {
-        # Try next app ID
         continue
     }
 }
 
-if (-not $success) {
-    # Fail silently to avoid hook errors
-    exit 1
-}
+if (-not $success) { exit 1 }
 
-# Log which App ID was used (for debugging)
 $debugLog = "$env:TEMP\claude-notification-debug.log"
-"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Notification sent with App ID: $usedAppId" | Out-File -Append -FilePath $debugLog
+"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - toast AppID=$usedAppId launch=$launch" | Out-File -Append -FilePath $debugLog
+exit 0
