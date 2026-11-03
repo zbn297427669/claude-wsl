@@ -27,7 +27,22 @@ fi
 if [[ -f "$INSTALL_DIR/disabled" ]]; then
   bell="${DIM}🔕${RST}"
 else
-  bell=$'\033[1;38;5;220m🔔'"${RST}"
+  app=""
+  if [[ -r "$INSTALL_DIR/platform.sh" ]]; then
+    # shellcheck disable=SC1091
+    . "$INSTALL_DIR/platform.sh" 2>/dev/null || true
+  fi
+  if type claude_wsl_terminal_app >/dev/null 2>&1; then
+    app=$(claude_wsl_terminal_app 2>/dev/null || true)
+  fi
+  # A muted app notifies on its own, so the lamp shows no toast rather than
+  # claiming one this hook will never send.
+  if [[ -n "$app" ]] && type claude_wsl_app_muted >/dev/null 2>&1 \
+      && claude_wsl_app_muted "$app" 2>/dev/null; then
+    bell="${DIM}🔕${RST}"
+  else
+    bell=$'\033[1;38;5;220m🔔'"${RST}"
+  fi
 fi
 
 if [[ -z "$out" ]]; then

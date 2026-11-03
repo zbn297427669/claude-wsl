@@ -26,12 +26,18 @@ export CLAUDE_NOTIFY_ENABLED="${CLAUDE_NOTIFY_ENABLED:-1}"
 export CLAUDE_NOTIFY_ON_OUTPUT="${CLAUDE_NOTIFY_ON_OUTPUT:-1}"
 export CLAUDE_NOTIFY_TAB_ICON="${CLAUDE_NOTIFY_TAB_ICON:-1}"
 
-# === Windows Terminal Directory Tracking ===
-# Emit OSC 9;9 on every prompt for new tab/duplicate tab directory inheritance
-# This allows duplicating tabs to open in the same directory
+# === Terminal Directory Tracking ===
+# Emit OSC 9;9 on every prompt for new tab/duplicate tab directory inheritance.
+# Needs a Windows path, which wslpath gives under WSL and cygpath under Git Bash.
 if [ -n "$WT_SESSION" ] 2>/dev/null; then
     _wt_osc99() {
-        printf '\e]9;9;%s\e\\' "$(wslpath -w "$PWD" 2>/dev/null || echo "$PWD")"
+        local win="$PWD"
+        if command -v wslpath >/dev/null 2>&1; then
+            win=$(wslpath -w "$PWD" 2>/dev/null) || win="$PWD"
+        elif command -v cygpath >/dev/null 2>&1; then
+            win=$(cygpath -w "$PWD" 2>/dev/null) || win="$PWD"
+        fi
+        printf '\e]9;9;%s\e\\' "$win"
     }
     # Add to PROMPT_COMMAND if not already there
     if [[ ! "$PROMPT_COMMAND" =~ _wt_osc99 ]] 2>/dev/null; then

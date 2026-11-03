@@ -14,16 +14,44 @@ else
     SCRIPT_DIR="/tmp"
 fi
 
-LOG_FILE="/tmp/claude-notify-debug.log"
+# Cross-platform helpers (cygpath on Git Bash, wslpath on WSL).
+# shellcheck source=platform.sh
+[ -r "$SCRIPT_DIR/platform.sh" ] && . "$SCRIPT_DIR/platform.sh" 2>/dev/null || true
+# shellcheck source=indicator.sh
+[ -r "$SCRIPT_DIR/indicator.sh" ] && . "$SCRIPT_DIR/indicator.sh" 2>/dev/null || true
+
+# Debug log. Overridable so tests do not write into the shared /tmp used by
+# other sessions; CLAUDE_WSL_DEBUG=0 turns it off for a quiet run.
+LOG_FILE="${CLAUDE_WSL_LOG:-/tmp/claude-notify-debug.log}"
 
 # Enable logging for debugging
-DEBUG=1
+DEBUG="${CLAUDE_WSL_DEBUG:-1}"
+
+# basename without the fork: this runs on every hook and Git Bash pays ~25ms
+# per external command. Handles POSIX, forward-slash Windows and backslash
+# paths, which are the three shapes the hook's cwd arrives in.
+_basename() {
+    local p="${1%/}"
+    p="${p##*/}"
+    printf '%s' "${p##*\\}"
+}
+
+# epoch seconds without the fork
+_now() {
+    local t=0
+    printf -v t '%(%s)T' -1 2>/dev/null || t=0
+    printf '%s' "$t"
+}
 
 log() {
     # Wrap logging in error handling - never fail
     {
         if [ "$DEBUG" = "1" ] 2>/dev/null && [ -n "$LOG_FILE" ] 2>/dev/null; then
-            echo "[$(date '+%H:%M:%S' 2>/dev/null || echo "??:??:??")] $*" >> "$LOG_FILE" 2>/dev/null || true
+            # bash's own clock, not `date`: this runs ~18 times per hook and a
+            # fork costs ~25ms on Git Bash, which is most of the hook's latency.
+            local _ts="??:??:??"
+            printf -v _ts '%(%H:%M:%S)T' -1 2>/dev/null || _ts="??:??:??"
+            printf '[%s] %s\n' "$_ts" "$*" >> "$LOG_FILE" 2>/dev/null || true
         fi
     } 2>/dev/null || true
 }
@@ -38,9 +66,28 @@ if [ -f "$_NOTIFY_HOME/disabled" ] 2>/dev/null || [ -f "$SCRIPT_DIR/disabled" ] 
     exit 0
 fi
 
+# Per-app mute list. Terminals that announce agent completion themselves
+# (Orca today, IDE panes next) would otherwise get a second, competing toast
+# for the same turn. Muted means: no toast, no bell marker, no OSC 9;4 --
+# the terminal's own notification is the only one. The global `disabled` flag
+# above still wins, and `/wsl-notify unmute <app>` brings this back.
+TERMINAL_APP=""
+if type claude_wsl_terminal_app >/dev/null 2>&1; then
+    TERMINAL_APP=$(claude_wsl_terminal_app 2>/dev/null)
+fi
+if [ -n "$TERMINAL_APP" ] && type claude_wsl_app_muted >/dev/null 2>&1 \
+        && claude_wsl_app_muted "$TERMINAL_APP" 2>/dev/null; then
+    log "=== notify.sh skipped (app muted: $TERMINAL_APP) ==="
+    if [ ! -t 0 ]; then
+        timeout 1 cat >/dev/null 2>&1 || true
+    fi
+    exit 0
+fi
+
 log "=== notify.sh called ==="
 log "PWD: $PWD"
 log "CLAUDE_WORKING_DIRECTORY: ${CLAUDE_WORKING_DIRECTORY:-not set}"
+log "Terminal app: ${TERMINAL_APP:-unknown}"
 log "WT_SESSION from environment: ${WT_SESSION:-not set}"
 
 # Read JSON from stdin (Claude Code sends hook data)
@@ -49,8 +96,11 @@ if [ -t 0 ]; then
     log "WARNING: No stdin data (terminal input)"
     HOOK_DATA=""
 else
-    # Read stdin with 1 second timeout to prevent hanging
-    HOOK_DATA=$(timeout 1 cat 2>/dev/null || true)
+    # Read stdin with a 1 second timeout so a hook invoked without a payload
+    # cannot hang the turn. Builtin `read` rather than `timeout cat`: it is
+    # ~55ms faster on Git Bash and returns non-zero on timeout, which we ignore.
+    HOOK_DATA=""
+    IFS= read -r -d '' -t 1 HOOK_DATA 2>/dev/null || true
     if [ -n "$HOOK_DATA" ]; then
         log "Received stdin: $HOOK_DATA"
     else
@@ -126,14 +176,14 @@ else
 fi
 
 # Get just the folder name
-FOLDER_NAME=$(basename "$WORKING_DIR")
+FOLDER_NAME=$(_basename "$WORKING_DIR")
 log "Folder name: $FOLDER_NAME"
 
 # Set session ID
 if [ -n "$HOOK_SESSION_ID" ]; then
     export CLAUDE_SESSION_ID="$HOOK_SESSION_ID"
 elif [ -z "$CLAUDE_SESSION_ID" ]; then
-    export CLAUDE_SESSION_ID="$(date +%s)-$$"
+    export CLAUDE_SESSION_ID="$(_now)-$$"
 fi
 log "Session ID: $CLAUDE_SESSION_ID"
 
@@ -154,23 +204,42 @@ fi
 
 # Record the foreground window NOW (user is still on this terminal).
 # Must be synchronous: a detached helper often captures the wrong window.
+# Costs ~550ms, so only the two events that precede a toast pay for it, and
+# only when the stored HWND is missing or older than 2 hours.
 if [ "$HOOK_EVENT" = "SessionStart" ] || [ "$HOOK_EVENT" = "UserPromptSubmit" ]; then
-    if command -v powershell.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
-        CAPTURE_SCRIPT=$(wslpath -w "$SCRIPT_DIR/capture-hwnd.ps1" 2>/dev/null) || CAPTURE_SCRIPT=""
-        if [ -n "$CAPTURE_SCRIPT" ] && [ -n "$CLAUDE_SESSION_ID" ]; then
-            timeout 2 powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden \
-                -File "$CAPTURE_SCRIPT" -SessionId "$CLAUDE_SESSION_ID" >/dev/null 2>&1 || true
-            log "Captured HWND for session $CLAUDE_SESSION_ID"
+    if type claude_wsl_ps >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/capture-hwnd.ps1" ]; then
+        HWND_STAMP_FILE="$_NOTIFY_HOME/hwnd-stamp-${CLAUDE_SESSION_ID}"
+        HWND_STAMP=""
+        if [ -n "$CLAUDE_SESSION_ID" ] && [ -f "$HWND_STAMP_FILE" ]; then
+            HWND_STAMP=$(cat "$HWND_STAMP_FILE" 2>/dev/null)
+        fi
+        HWND_AGE=999999
+        [ -n "$HWND_STAMP" ] && HWND_AGE=$(( $(_now) - HWND_STAMP ))
+        if [ "$HWND_AGE" -gt 7200 ] 2>/dev/null || [ "$HWND_AGE" -lt 0 ] 2>/dev/null; then
+            # claude_wsl_ps_timeout, not `timeout claude_wsl_ps`: timeout can
+            # only exec a file, so wrapping the function made this silently
+            # never run.
+            if type claude_wsl_ps_timeout >/dev/null 2>&1 \
+                    && claude_wsl_ps_timeout 3 "$SCRIPT_DIR/capture-hwnd.ps1" \
+                        -SessionId "$CLAUDE_SESSION_ID" >/dev/null 2>&1; then
+                mkdir -p "$_NOTIFY_HOME" 2>/dev/null
+                _now > "$HWND_STAMP_FILE" 2>/dev/null || true
+                log "Captured HWND for session $CLAUDE_SESSION_ID"
+            fi
+        else
+            log "HWND capture skipped (${HWND_AGE}s old)"
         fi
     fi
 fi
 
 # Activate bell icon - create signal file for shell to detect (with error handling)
 # Use different files for permission requests vs completions so shell knows which state to return to
+# The scratch dir is overridable so a test run keeps its markers to itself.
+CLAUDE_WSL_TMP="${CLAUDE_WSL_TMP:-/tmp}"
 if [ "$HOOK_EVENT" = "Notification" ] 2>/dev/null; then
-    BELL_SIGNAL_FILE="/tmp/claude-bell-permission-${HOOK_SESSION_ID:-default}"
+    BELL_SIGNAL_FILE="$CLAUDE_WSL_TMP/claude-bell-permission-${HOOK_SESSION_ID:-default}"
 else
-    BELL_SIGNAL_FILE="/tmp/claude-bell-${HOOK_SESSION_ID:-default}"
+    BELL_SIGNAL_FILE="$CLAUDE_WSL_TMP/claude-bell-${HOOK_SESSION_ID:-default}"
 fi
 touch "$BELL_SIGNAL_FILE" 2>/dev/null || log "WARNING: Failed to create bell signal file"
 log "Created bell signal file: $BELL_SIGNAL_FILE (Event: ${HOOK_EVENT:-unknown})"
@@ -180,6 +249,14 @@ log "Created bell signal file: $BELL_SIGNAL_FILE (Event: ${HOOK_EVENT:-unknown})
 
 TARGET_PTY=""
 TARGET_WT_SESSION=""
+
+# The PTY path only exists on WSL, where /proc exposes every process' fds and
+# the shell owns a /dev/pts node. Under Git Bash /proc knows only MSYS
+# processes, never the native Claude Code process or its terminal, so the whole
+# trace is a guaranteed miss that costs ~1.5s. Skip it there.
+if type claude_wsl_is_msys >/dev/null 2>&1 && claude_wsl_is_msys; then
+    log "MSYS host: no PTY to find, using terminalSequence instead"
+else
 
 # Method 1: Trace parent process tree
 # This hook is spawned by Claude Code, which is spawned by bash/zsh
@@ -271,68 +348,57 @@ if [ -z "$TARGET_PTY" ]; then
     done
 fi
 
-# Send OSC 9;4 sequence for progress/alert indicators (with comprehensive error handling)
-# OSC 9;4 states: 0=hidden, 1=default/green, 2=error/red, 3=indeterminate/spinner, 4=warning/orange
-# CRITICAL: Never fail even if PTY write fails - permissions or device issues should not crash
+fi  # end of the non-MSYS / WSL-only PTY search
+
+# Signal the tab indicator. Two paths, tried in order:
+#   - WSL: write the escape sequence straight to the shell's PTY.
+#   - Everywhere else (native Windows included): hand Claude Code a
+#     terminalSequence to emit for us. Hook stdout is piped and hooks spawn
+#     hidden, so we cannot reach the terminal ourselves.
+# CRITICAL: Never fail. A missing indicator is cosmetic; a failing hook is not.
+INDICATOR_SEQ=""
+if type claude_wsl_indicator_state >/dev/null 2>&1; then
+    INDICATOR_SEQ=$(claude_wsl_indicator_state "$HOOK_EVENT" "${SESSION_END_REASON:-}")
+fi
+
+# Terminals that drop OSC 9;4 in favour of a private protocol get nothing from
+# us: the sequence would be invisible, and speaking their private protocol is
+# both out of scope and a duplicate of their own notification.
+INDICATOR_SUPPORTED=1
+if type claude_wsl_indicator_unsupported >/dev/null 2>&1; then
+    claude_wsl_indicator_unsupported && INDICATOR_SUPPORTED=0
+fi
+
+INDICATOR_SENT=0
 if [ -n "$TARGET_PTY" ] 2>/dev/null && [ -w "$TARGET_PTY" ] 2>/dev/null; then
-    if [ "$HOOK_EVENT" = "Stop" ] 2>/dev/null; then
-        # Stop spinner and show orange circle on completion (response ready or interrupted via Escape)
-        { printf '\033]9;4;4;100\007' > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: Failed to write orange circle to PTY"
-        # Send BEL to trigger Windows Terminal's native bell indicator (outlined bell)
-        { printf '\007' > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: Failed to write BEL to PTY"
-        # Update tab title to current folder name
-        { printf '\033]0;%s\033\\' "$FOLDER_NAME" > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: Failed to update tab title"
-        log "Set ORANGE CIRCLE and sent BEL on $HOOK_EVENT: $FOLDER_NAME"
-    elif [ "$HOOK_EVENT" = "SessionEnd" ] 2>/dev/null; then
-        # SessionEnd reason: "clear", "logout", "prompt_input_exit", or "other"
-        if [ "$SESSION_END_REASON" = "other" ]; then
-            # Error or timeout - show RED error indicator
-            { printf '\033]9;4;2;100\007' > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: PTY write failed" 2>/dev/null
-            log "Set RED ERROR indicator on SessionEnd (reason: ${SESSION_END_REASON:-unknown} - error/timeout): $FOLDER_NAME"
-        else
-            # User exited Claude Code (Ctrl+C, /clear, logout) - hide indicator, show Linux penguin
-            { printf '\033]9;4;0;0\007' > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: PTY write failed" 2>/dev/null
-            log "HIDDEN indicator on SessionEnd (reason: ${SESSION_END_REASON:-unknown} - user exited, back to penguin): $FOLDER_NAME"
-        fi
-        # Send BEL to trigger Windows Terminal's native bell indicator (outlined bell)
-        printf '\007' > "$TARGET_PTY" 2>/dev/null
-        # Update tab title to current folder name
-        { printf '\033]0;%s\033\\' "$FOLDER_NAME" > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: Failed to update tab title"
-    elif [ "$HOOK_EVENT" = "Notification" ]; then
-        # Permission request - keep current indicator (spinner) and add BEL
-        # Don't change the spinner to circle - user will give permission and it should stay as spinner
-        printf '\007' > "$TARGET_PTY" 2>/dev/null
-        # Update tab title to current folder name
-        { printf '\033]0;%s\033\\' "$FOLDER_NAME" > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: Failed to update tab title"
-        log "Sent BEL for permission request (keeping spinner): $TARGET_PTY"
-    elif [ "$HOOK_EVENT" = "UserPromptSubmit" ]; then
-        # REQUIREMENT 2 & 4: Show ORANGE SPINNER when Claude starts computing (state 3 = indeterminate = spinner)
-        { printf '\033]9;4;3;0\007' > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: PTY write failed" 2>/dev/null
-        # Update tab title to current folder name
-        { printf '\033]0;%s\033\\' "$FOLDER_NAME" > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: Failed to update tab title"
-        log "Set ORANGE SPINNER on UserPromptSubmit: $TARGET_PTY"
-    elif [ "$HOOK_EVENT" = "SessionStart" ]; then
-        # REQUIREMENT 1: Show ORANGE CIRCLE OUTLINE when Claude Code session starts (state 4 = warning = orange/yellow circle)
-        { printf '\033]9;4;4;100\007' > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: PTY write failed" 2>/dev/null
-        # Update tab title to current folder name
-        { printf '\033]0;%s\033\\' "$FOLDER_NAME" > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: Failed to update tab title"
-        log "Set ORANGE CIRCLE on SessionStart: $TARGET_PTY"
-    else
-        # For other events, show orange circle (state 4 = warning = orange/yellow)
-        { printf '\033]9;4;4;100\007' > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: PTY write failed" 2>/dev/null
-        # Update tab title to current folder name
-        { printf '\033]0;%s\033\\' "$FOLDER_NAME" > "$TARGET_PTY"; } 2>/dev/null || log "WARNING: Failed to update tab title"
-        log "Set orange circle indicator to: $TARGET_PTY (Event: ${HOOK_EVENT:-unknown})"
+    # WSL: the PTY write is immediate and needs no cooperation from Claude Code.
+    if [ "$INDICATOR_SUPPORTED" = "1" ] && type claude_wsl_indicator_pty >/dev/null 2>&1; then
+        claude_wsl_indicator_pty "$TARGET_PTY" "$INDICATOR_SEQ" && INDICATOR_SENT=1
     fi
+    # The bell is what makes a background tab visible at all.
+    case "${HOOK_EVENT:-}" in
+        Stop|Notification|SessionEnd) printf '\007' > "$TARGET_PTY" 2>/dev/null || true ;;
+    esac
+    log "PTY indicator: event=${HOOK_EVENT:-unknown} seq=$INDICATOR_SEQ sent=$INDICATOR_SENT"
+elif [ "$INDICATOR_SUPPORTED" = "1" ] && type claude_wsl_emit_indicator_and_title >/dev/null 2>&1; then
+    # No PTY: native Windows, or the process trace failed. Claude Code writes
+    # the sequence for us. Indicator and title go out as one JSON line.
+    case "${HOOK_EVENT:-}" in
+        Stop|Notification|UserPromptSubmit|SessionStart|SessionEnd)
+            claude_wsl_emit_indicator_and_title "${INDICATOR_SEQ:-9;4;4;100}" "$FOLDER_NAME"
+            INDICATOR_SENT=1
+            ;;
+    esac
+    log "OSC indicator emitted: event=${HOOK_EVENT:-unknown} seq=$INDICATOR_SEQ"
 else
-    log "WARNING: Could not find target PTY for $WORKING_DIR"
+    log "No indicator path (pty=${TARGET_PTY:-none} supported=$INDICATOR_SUPPORTED)"
 fi
 
 # Send Windows toast notification on Stop event (when Claude finishes) OR Notification event (when Claude asks for permission)
 SKIP_TOAST=0
 if [ "$HOOK_EVENT" = "Stop" ] || [ "$HOOK_EVENT" = "Notification" ]; then
-    TOAST_STAMP="/tmp/claude-wsl-last-toast-${CLAUDE_SESSION_ID}"
-    NOW_TS=$(date +%s 2>/dev/null || echo 0)
+    TOAST_STAMP="${CLAUDE_WSL_TMP:-/tmp}/claude-wsl-last-toast-${CLAUDE_SESSION_ID}"
+    NOW_TS=$(_now)
     if [ -f "$TOAST_STAMP" ] 2>/dev/null; then
         LAST_TS=$(cat "$TOAST_STAMP" 2>/dev/null || echo 0)
         if [ "$NOW_TS" -gt 0 ] 2>/dev/null && [ "$LAST_TS" -gt 0 ] 2>/dev/null; then
@@ -393,36 +459,33 @@ if [ "$SKIP_TOAST" != "1" ] && { [ "$HOOK_EVENT" = "Stop" ] || [ "$HOOK_EVENT" =
         fi
 
         log "Calling send-notification.ps1 for $HOOK_EVENT event..."
-        # Pass the WT_SESSION we found from process tracing - with comprehensive error handling
         {
-            # Verify wslpath exists before using it
-            if command -v wslpath >/dev/null 2>&1 && command -v powershell.exe >/dev/null 2>&1; then
-                WINDOWS_SCRIPT=$(wslpath -w "$NOTIFICATION_SCRIPT" 2>/dev/null) || WINDOWS_SCRIPT=""
-                if [ -n "$WINDOWS_SCRIPT" ]; then
-                    NOTIFY_SOUND=""
-                    if [ -f "$_NOTIFY_HOME/sound" ]; then
-                        NOTIFY_SOUND=$(head -n 1 "$_NOTIFY_HOME/sound" 2>/dev/null | tr -d '\r')
-                    elif [ -f "$SCRIPT_DIR/sound" ]; then
-                        NOTIFY_SOUND=$(head -n 1 "$SCRIPT_DIR/sound" 2>/dev/null | tr -d '\r')
-                    fi
-                    NOTIFY_SOUND="${NOTIFY_SOUND:-Default}"
-                    powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden \
-                        -File "$WINDOWS_SCRIPT" \
-                        -Title "$FOLDER_NAME" \
-                        -Message "$NOTIFICATION_MESSAGE" \
-                        -SessionId "${HOOK_SESSION_ID:-$CLAUDE_SESSION_ID}" \
-                        -TabTitle "$FOLDER_NAME" \
-                        -WtSession "${TARGET_WT_SESSION:-}" \
-                        -Sound "$NOTIFY_SOUND" \
-                        2>/dev/null &
-                    log "Notification script called (PID: $!)"
-                    log "Passed session to toast: ${HOOK_SESSION_ID:-$CLAUDE_SESSION_ID}"
-                    date +%s > "$TOAST_STAMP" 2>/dev/null || true
-                else
-                    log "ERROR: Could not convert path to Windows format"
+            # Path conversion comes from platform.sh: wslpath under WSL, cygpath
+            # under Git Bash. Both are absent on a bare Windows shell, in which
+            # case the toast is skipped rather than attempted with a bad path.
+            if type claude_wsl_ps >/dev/null 2>&1; then
+                NOTIFY_SOUND=""
+                if [ -f "$_NOTIFY_HOME/sound" ]; then
+                    NOTIFY_SOUND=$(head -n 1 "$_NOTIFY_HOME/sound" 2>/dev/null | tr -d '\r')
+                elif [ -f "$SCRIPT_DIR/sound" ]; then
+                    NOTIFY_SOUND=$(head -n 1 "$SCRIPT_DIR/sound" 2>/dev/null | tr -d '\r')
                 fi
+                NOTIFY_SOUND="${NOTIFY_SOUND:-Default}"
+                # Background it: PowerShell startup is ~440ms and the hook should
+                # not hold the turn open for it.
+                claude_wsl_ps "$NOTIFICATION_SCRIPT" \
+                    -Title "$FOLDER_NAME" \
+                    -Message "$NOTIFICATION_MESSAGE" \
+                    -SessionId "${HOOK_SESSION_ID:-$CLAUDE_SESSION_ID}" \
+                    -TabTitle "$FOLDER_NAME" \
+                    -WtSession "${TARGET_WT_SESSION:-}" \
+                    -Sound "$NOTIFY_SOUND" \
+                    >/dev/null 2>&1 &
+                log "Notification script called (PID: $!)"
+                log "Passed session to toast: ${HOOK_SESSION_ID:-$CLAUDE_SESSION_ID}"
+                _now > "$TOAST_STAMP" 2>/dev/null || true
             else
-                log "ERROR: wslpath or powershell.exe not available"
+                log "ERROR: no PowerShell host or path converter available"
             fi
         } 2>/dev/null || log "ERROR: Failed to call notification script"
     else

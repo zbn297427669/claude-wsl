@@ -1,9 +1,15 @@
 #!/bin/bash
-# Wrapper to suppress all output from notify.sh
-# This prevents Claude Code from seeing hook errors
-# CRITICAL: Always exit 0 - never fail the hook even if notify.sh fails
+# Wrapper around notify.sh.
+#
+# notify.sh's stdout is the hook's reply channel: a {"terminalSequence": ...}
+# object tells Claude Code which escape sequence to write, because the hook
+# itself cannot reach the terminal. So stdout must be forwarded -- but only
+# when it really is that JSON reply. Anything else notify.sh prints (a stray
+# echo, a warning) would be parsed as hook output and shown to the user, so
+# those lines are dropped.
+#
+# CRITICAL: Always exit 0 - never fail the hook even if notify.sh fails.
 
-# CRITICAL ERROR HANDLING: Never crash or fail
 set +e  # Don't exit on errors
 set +u  # Don't exit on undefined variables
 
@@ -14,12 +20,18 @@ else
     SCRIPT_DIR="/tmp"
 fi
 
-# Execute notify.sh with error suppression
-# Pass stdin through so notify.sh can receive hook data from Claude Code
-# Suppress stdout/stderr to prevent polluting Claude's output
-# Even if notify.sh doesn't exist or fails, we exit 0
 if [ -f "$SCRIPT_DIR/notify.sh" ] 2>/dev/null && [ -r "$SCRIPT_DIR/notify.sh" ] 2>/dev/null; then
-    "$SCRIPT_DIR/notify.sh" >/dev/null 2>&1 || true
+    # Stdin passes straight through: notify.sh reads the hook's JSON payload.
+    OUT=$("$SCRIPT_DIR/notify.sh" 2>/dev/null)
+    # Forward only JSON objects that carry a terminalSequence. Everything else
+    # is diagnostic noise that must not reach Claude Code's output parser.
+    if [ -n "$OUT" ]; then
+        printf '%s\n' "$OUT" | while IFS= read -r line; do
+            case "$line" in
+                *'"terminalSequence"'*) printf '%s\n' "$line" ;;
+            esac
+        done
+    fi
 fi
 
 # ALWAYS exit successfully - hook must never fail

@@ -36,12 +36,70 @@ echo '/path/to/your-statusline.sh' > ~/.local/share/claude-wsl/statusline-inner
 
 ## requirements
 
-- Windows Terminal + WSL (Ubuntu/Debian)
+- Windows (native or WSL) — any terminal
 - Claude Code installed
 - Node.js 18+
 - Bash shell
 
 if you're using zsh or fish, this won't work. PRs welcome but I use bash.
+
+## how notifications reach you
+
+Two independent channels, so it works whichever terminal you run Claude Code in:
+
+- **Windows toast** — delivered by PowerShell (`send-notification.ps1`) through
+  WinRT. Terminal-independent and shown even when the window is focused, which
+  is the only way to get a notification while you are actually looking at it.
+- **Tab indicator** — OSC 9;4 (spinner / orange circle) plus the tab title.
+  Under WSL this is written straight to the shell's PTY. Everywhere else the
+  hook returns `{"terminalSequence": ...}` and Claude Code emits it, because
+  hook stdout is piped and never reaches the terminal on its own.
+
+Put together: native Windows and WSL behave the same, and no terminal needs to
+be on a list for it to work.
+
+### terminals with their own notifications
+
+We never speak a terminal's private notification protocol (ELYTerminal's
+OSC 7501, or OSC 777 / OSC 9 for others). Those can only fire when a program
+sends them or when a command finishes, so staying silent means the terminal has
+nothing to announce and cannot duplicate our toast. `indicator.sh` also skips
+OSC 9;4 on terminals known to ignore it, so the sequence is not wasted.
+
+### sound
+
+`/wsl-notify sound Mail` (also IM, Reminder, SMS, Default, silent, Alarm, Call).
+The choice is stored in `~/.local/share/claude-wsl/sound` and passed to the
+toast. `silent` mutes the sound while keeping the toast.
+
+### terminals that already notify
+
+Some terminals announce agent completion themselves — Orca does today, and IDE
+panes are moving that way. Being notified twice for one turn is worse than not
+being notified, so a terminal can be muted by name:
+
+```bash
+/wsl-notify mute          # mute the terminal you are running in
+/wsl-notify mute Orca     # or name it explicitly
+/wsl-notify apps          # what am I running in, and what is muted
+/wsl-notify unmute Orca
+```
+
+Muted means this hook steps aside completely: no toast, no bell marker, no
+OSC 9;4 progress — the terminal's own notification is the only one. The list
+lives in `~/.local/share/claude-wsl/mute-apps`, one app per line (`#` comments
+allowed, case-insensitive), and the status-line lamp turns 🔕 so it never
+claims a toast that will not arrive. `/wsl-notify off` still silences
+everything regardless of the list.
+
+The app is identified from `TERM_PROGRAM`, falling back to per-terminal
+variables (`ORCA_TERMINAL_HANDLE`, `WT_SESSION`, `WEZTERM_PANE`, …). Under WSL
+these come only from the Windows side, so set them in `.bashrc` to use
+per-app muting there:
+
+```bash
+export WSLENV="$WSLENV:TERM_PROGRAM/u:ORCA_TERMINAL_HANDLE/u"
+```
 
 ## troubleshooting
 

@@ -1,6 +1,6 @@
 ---
-description: 打开或关闭 WSL 的 Claude 完成通知，或选择铃声（Mail / Reminder 等）
-argument-hint: on|off|toggle|status|sound
+description: 打开或关闭 WSL 的 Claude 完成通知，选择铃声（Mail / Reminder 等），或让某个终端应用自己通知
+argument-hint: on|off|toggle|status|sound|mute|unmute|apps
 allowed-tools: ["Bash"]
 ---
 
