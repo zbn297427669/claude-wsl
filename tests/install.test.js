@@ -79,6 +79,27 @@ describe("installer paths", () => {
     expect(settings().statusLine.command).not.toContain("\\");
   });
 
+  it("points hooks at the wrapper the host shell can launch", () => {
+    install();
+    const expected =
+      process.platform === "win32" ? /notify-wrapper\.cmd$/ : /notify-wrapper\.sh$/;
+    for (const { command } of hookCommands(settings())) {
+      expect(command).toMatch(expected);
+    }
+  });
+
+  it("gates the Windows wrapper on Orca before starting bash", () => {
+    const cmd = fs.readFileSync(
+      path.join(ROOT, "templates", "notify", "notify-wrapper.cmd"),
+      "utf8"
+    );
+    // Orca reports completions itself; the hook must leave before spawning a
+    // shell so it adds neither a duplicate toast nor a console window.
+    expect(cmd).toContain("ORCA_TAB_ID");
+    expect(cmd).toContain("notify-wrapper.sh");
+    expect(cmd).toContain("bash.exe");
+  });
+
   it("registers a hook for every lifecycle event it needs", () => {
     install();
     const events = hookCommands(settings()).map((h) => h.event).sort();
@@ -111,6 +132,29 @@ describe("installer idempotency", () => {
     expect(hookCommands(settings()).length).toBe(first);
   });
 
+  it("migrates the legacy .sh hook to the .cmd wrapper", () => {
+    if (process.platform !== "win32") return;
+    const legacy = path
+      .join(home, ".local", "share", "claude-wsl", "notify-wrapper.sh")
+      .replace(/\\/g, "/");
+    const settingsPath = path.join(home, ".claude", "settings.json");
+    const seeded = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    seeded.hooks = {
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: legacy }] }],
+    };
+    fs.writeFileSync(settingsPath, JSON.stringify(seeded));
+
+    install();
+
+    const commands = hookCommands(settings())
+      .filter((h) => h.event === "UserPromptSubmit")
+      .map((h) => h.command);
+    // The old entry must be replaced, not kept beside the new one: it is the
+    // one that opens a console window.
+    expect(commands.some((c) => /notify-wrapper\.sh$/.test(c))).toBe(false);
+    expect(commands.filter((c) => /notify-wrapper\.cmd$/.test(c))).toHaveLength(1);
+  });
+
   it("recognises an already-wrapped status line instead of nesting it", () => {
     install();
     install();
@@ -130,6 +174,7 @@ describe("installed files", () => {
     for (const f of [
       "notify.sh",
       "notify-wrapper.sh",
+      "notify-wrapper.cmd",
       "platform.sh",
       "indicator.sh",
       "send-notification.ps1",

@@ -58,6 +58,12 @@ Two independent channels, so it works whichever terminal you run Claude Code in:
 Put together: native Windows and WSL behave the same, and no terminal needs to
 be on a list for it to work.
 
+On native Windows the hook is a small `notify-wrapper.cmd`. It starts Git Bash's
+console-subsystem `bash.exe` with the window hidden, so a bare `.sh` command
+cannot fall through to the `.sh` file association and flash a console window.
+When the terminal has its own notifications (next section), the wrapper leaves
+before it starts any shell at all.
+
 ### terminals with their own notifications
 
 We never speak a terminal's private notification protocol (ELYTerminal's
