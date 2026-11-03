@@ -88,7 +88,7 @@ describe("installer paths", () => {
     }
   });
 
-  it("gates the Windows wrapper on Orca before starting bash", () => {
+  it("gates the Windows wrapper on Orca and Cursor before starting bash", () => {
     const cmd = fs.readFileSync(
       path.join(ROOT, "templates", "notify", "notify-wrapper.cmd"),
       "utf8"
@@ -96,6 +96,7 @@ describe("installer paths", () => {
     // Orca reports completions itself; the hook must leave before spawning a
     // shell so it adds neither a duplicate toast nor a console window.
     expect(cmd).toContain("ORCA_TAB_ID");
+    expect(cmd).toContain("CURSOR_VERSION");
     expect(cmd).toContain("notify-wrapper.sh");
     expect(cmd).toContain("bash.exe");
   });

@@ -1,5 +1,7 @@
 @echo off
 setlocal
+rem Cursor imports Claude Code hooks too; claude-wsl notifies for Claude Code.
+if defined CURSOR_VERSION exit /b 0
 rem Orca announces agent completion itself. Leave before starting bash so the
 rem hook adds no second notification and no console window.
 if defined ORCA_TAB_ID exit /b 0
