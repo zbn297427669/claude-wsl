@@ -18,6 +18,8 @@ public static class WslFocus {
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr extra);
@@ -29,10 +31,20 @@ public static class WslFocus {
     const uint KEYEVENTF_KEYUP = 2;
     const byte VK_MENU = 0x12;
 
-    static readonly HashSet<string> Ok = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-        "WindowsTerminal", "WindowsTerminalPreview", "OpenConsole",
-        "Tabby", "wezterm-gui", "Alacritty", "Hyper", "FluentTerminal",
-        "mintty", "Cursor", "Code"
+    // Deny-list rather than allow-list: a new terminal must not need a code
+    // change to be focusable. These are processes that never own the window we
+    // want (our own helpers, the console host, and Claude Code itself).
+    static readonly HashSet<string> Skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+        "powershell", "pwsh", "WindowsPowerShell", "wscript", "cscript",
+        "conhost", "OpenConsole", "cmd", "conime",
+        "claude", "claude-2.1.310-win32-x64", "node"
+    };
+
+    // Known terminal host window classes, used to pick a fallback window.
+    static readonly HashSet<string> TerminalClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+        "CASCADIA_HOSTING_WINDOW_CLASS", "ConsoleWindowClass", "mintty",
+        "org.wezfurlong.wezterm", "GLFW30", "Alacritty", "VirtualConsole",
+        "TabbyWndClass", "Chrome_WidgetWin_1", "SunAwtFrame"
     };
 
     static string ProcName(IntPtr h) {
@@ -66,11 +78,30 @@ public static class WslFocus {
         if (attached) AttachThreadInput(thisThread, fgThread, false);
     }
 
+    static string ClassName(IntPtr h) {
+        var sb = new StringBuilder(256);
+        GetClassName(h, sb, 256);
+        return sb.ToString();
+    }
+
+    // A stored HWND can be stale or belong to a different app by the time the
+    // toast is clicked; only raise it if it still looks like a user window we
+    // did not exclude.
+    public static bool IsUsable(IntPtr h) {
+        if (!IsAlive(h) || !IsWindowVisible(h)) return false;
+        string n = ProcName(h);
+        if (string.IsNullOrEmpty(n) || Skip.Contains(n)) return false;
+        if (GetWindowTextLength(h) > 0) return true;
+        return TerminalClasses.Contains(ClassName(h));
+    }
+
     public static IntPtr FirstTerminal() {
         IntPtr found = IntPtr.Zero;
         EnumWindows((h, l) => {
             if (!IsWindowVisible(h)) return true;
-            if (Ok.Contains(ProcName(h))) { found = h; return false; }
+            string n = ProcName(h);
+            if (string.IsNullOrEmpty(n) || Skip.Contains(n)) return true;
+            if (TerminalClasses.Contains(ClassName(h))) { found = h; return false; }
             return true;
         }, IntPtr.Zero);
         return found;
@@ -93,11 +124,11 @@ function Get-StoredHwnd([string]$Sid) {
 $target = [IntPtr]::Zero
 if ($Uri -match 'hwnd=(\d+)') {
     $candidate = [IntPtr][long]$Matches[1]
-    if ([WslFocus]::IsAlive($candidate)) { $target = $candidate }
+    if ([WslFocus]::IsUsable($candidate)) { $target = $candidate }
 }
 if ($target -eq [IntPtr]::Zero -and $Uri -match 'sid=([^&]+)') {
-    $target = Get-StoredHwnd $Matches[1]
-    if (-not [WslFocus]::IsAlive($target)) { $target = [IntPtr]::Zero }
+    $stored = Get-StoredHwnd $Matches[1]
+    if ([WslFocus]::IsUsable($stored)) { $target = $stored }
 }
 if ($target -eq [IntPtr]::Zero) {
     $target = [WslFocus]::FirstTerminal()
@@ -106,9 +137,10 @@ if ($target -ne [IntPtr]::Zero) {
     [WslFocus]::Force($target)
 }
 
-# Optional: tell WSL shell integration to drop the bell (best-effort).
+# Tell the WSL-side shell integration to drop its bell (best-effort, WSL only).
+# Under Git Bash there is no wsl.exe in PATH, so this stays a no-op.
 if ($Uri -match 'sid=([^&]+)') {
-    $sid = $Matches[1]
+    $sid = ($Matches[1] -replace '[^A-Za-z0-9._-]', '_')
     try {
         $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
         if ($wsl) {

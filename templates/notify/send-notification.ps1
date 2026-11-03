@@ -18,7 +18,9 @@ function Ensure-Protocol {
     if ((Test-Path $root) -and (Test-Path $vbs)) { return }
     $installer = Join-Path $PSScriptRoot 'install-protocol.ps1'
     if (Test-Path $installer) {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer | Out-Null
+        # No -ExecutionPolicy Bypass: these files are copied to local NTFS and
+        # carry no Zone.Identifier, so RemoteSigned already allows them.
+        & powershell.exe -NoProfile -File $installer | Out-Null
     }
 }
 

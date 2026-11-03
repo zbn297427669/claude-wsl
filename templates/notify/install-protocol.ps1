@@ -10,7 +10,9 @@ $src = $PSScriptRoot
 foreach ($name in @('focus-session.ps1', 'focus-launch.vbs', 'capture-hwnd.ps1', 'send-notification.ps1')) {
     $from = Join-Path $src $name
     $to = Join-Path $dest $name
-    if (Test-Path $from) {
+    # Skip a copy onto itself: send-notification.ps1 can call this script from
+    # the destination directory, where src and dest are the same file.
+    if ((Test-Path $from) -and ($from -ne $to)) {
         Copy-Item -Force $from $to
     }
 }
@@ -22,6 +24,10 @@ if (-not (Test-Path $root)) {
     New-Item -Path $root -Force | Out-Null
 }
 New-ItemProperty -Path $root -Name '(Default)' -Value 'URL:Claude WSL Protocol' -PropertyType String -Force | Out-Null
+# Make the handler visible in Windows' "Choose an app" list rather than an
+# anonymous entry, and mark it as non-elevated so a click does not prompt.
+New-ItemProperty -Path $root -Name 'FriendlyTypeName' -Value 'Claude WSL focus handler' -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $root -Name 'EditFlags' -Value 2 -PropertyType DWord -Force | Out-Null
 New-ItemProperty -Path $root -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null
 $open = Join-Path $root 'shell\open\command'
 if (-not (Test-Path $open)) {
